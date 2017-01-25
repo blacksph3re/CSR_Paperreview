@@ -10,6 +10,8 @@
 \pagestyle{headings}
 \usepackage{a4wide}
 \usepackage[colorlinks,hyperfigures,backref,bookmarks,draft=false]{hyperref}
+\usepackage{graphicx}
+
 
 \title{Paper Review - CSR Core Suprise Removal in Commodity Operating Systems}
 \author{Nico Westerbeck}
@@ -33,6 +35,8 @@ Among the components of a computer, there is none which can not fail in some way
 
 One topic which is essential in this context are interrupts. These are hardware signals which are sent to the operating system. When an interrupt is received, the core which receives it will interrupt normal execution and run the fitting interrupt handler from the kernel to address that interrupt. Usually these handlers are kept as short as possible, typically just reading some data from the device and scheduling further handling of that interrupt for later. Interrupts are the default way of hardware sending messages to the operating system, like in case of a keyboard key press or even in case of component failures.
 
+Also, in some parts we reference a technology called HTM - Hardware Transactional Memory. The basic idea behind this is that parts of the instruction flow of an executable can be wrapped inside a transaction, making all the memory writes inside that transaction atomic. Either all of them are committed to main memory or none. This also incorporates the possibility to rollback a transaction in some cases, for example if a write of another process to the same memory location was detected before commit or when some other failure occurs inside that section. In physical implementations like Intel's TSX \cite{IntelTSX} there are some more limitations to the set of instructions that can live inside a transaction. For example systemcalls can not be wrapped, and there also is a limit on the number of instructions a transaction can accomodate.
+
 
 \section{Previous and Related Work}
 In a computer system there are several mechanisms to tolerate the failure of components, and it is an active area of research to improve these meachnisms or invent new ones. We will present some mechanisms here on a very abstract level, and then go in detail about core failure handling.
@@ -43,7 +47,7 @@ In a computer system there are several mechanisms to tolerate the failure of com
 Memory errors are one of the most common sources, and there are some approaches quite similar. Du et al. \cite{MemErrPrediction} try to predict and prevent these errors within a VM hypervisor. Their approach was to intensely study the characteristics and statistics of hardware memory errors and found that they are very likely to reoccur in the same place, as soon as they occurred once. Based upon this, they implemented an architecture, which listens for local memory errors\footnote{An operating system can listen for Machine Check Exceptions, which will report hardware failures including memory errors.}, and if one occured decided if to take load-balancing measures to reduce load on either the page, DIMM or node that failure occured on. This enabled the system to be significantly more robust towards memory errors and increased the availability of a node without having a high impact on normal operation performance.
 
 \subsection{Hard-drive errors}
-Filesystems traditionally incorporate several failure tolerance mechanisms, as hard-drives are very fault and failure prone. In the server business, distributed file-systems try to overcome the unreliability of one harddrive by spreading redundant data over several disks in a cluster. For single disks, surprise plugging and unplugging is an implemented kernel feature already, allowing an operating system to survive in case of suprise harddisk removal or addition. %TODO Quote, maybe use: Hot and Surprise Plug Recommendations for Enterprise PCIe Switches in the Data Center
+Filesystems traditionally incorporate several failure tolerance mechanisms, as hard-drives are very failure prone. In the server business, distributed file-systems try to overcome the unreliability of one harddrive by spreading redundant data over several disks in a cluster. For single disks, surprise plugging and unplugging is an implemented kernel feature already, allowing an operating system to survive in case of suprise harddisk removal or addition. %TODO Quote, maybe use: Hot and Surprise Plug Recommendations for Enterprise PCIe Switches in the Data Center
 Even to maintain data availability in the presence of single disk failures is a well researched topic, with the most prominent solution RAID \cite{RAID} being in place for almost 30 years.
 
 Currently, distributed file systems are in the focus of research, as solutions how to reliably store huge amounts of data that exceed the capacities of a single disk by magnitudes are not so well tested. However, these approaches accept the presence of full node failures and thus are on a higher level than the paper by Shalev et al. To keep the extend of this work short, we will only focus on approaches to enable single nodes to survive hardware failures, not a whole cluster.
@@ -53,9 +57,17 @@ The paper CSR: Core suprise removal in commodity operating systems \cite{CSR} pr
 
 At first, it is essential to understand the failure model the paper assumes. They cope with spontaneous, permanent failures of one or more cores in a multicore system, that could be induced by malfunctioning transistors or violations of cpu-internal constraints, causing the core to stop code execution. These failures might happen in a cascade, crashing several cores in a row within a short timespan. During a crash, the internal registers and buffers might be destroyed, however the paper requires the internal cache to be left intact.
 
-The mechanism described in the paper is loosely based on the kernel hotplug mechanism for adding and removing cores during runtime. However, the hotplug mechanism in current kernels depends on the cooperation of the core that is to be shut down, which is obviously not possible in the case of a spontaneous hardware failure. Also no notice of the failure is available in advance, so no measures can be initiated before the core fails. Currently, the operating system will panic in this case, so the aim of CSR is to keep the operating system from crashing, while allowing single processes to be terminated. More explicitely, the process that was scheduled for execution during the time of the crash is sacrified, while other processes on the machine shall survive regardless of their core affinity. Moreover the system shall be able to tolerate cascading failures crashing multiple cores in a row, as long as at least one working core remains active.
+The mechanism described in the paper is loosely based on the kernel hotplug mechanism for adding and removing cores during runtime. However, the hotplug mechanism in current kernels depends on the cooperation of the core that is to be shut down, which is obviously not possible in the case of a spontaneous hardware failure. Also no notice of the failure is available in advance, so no measures can be initiated before the core fails. Currently, the operating system will panic in this case, so the aim of CSR is to keep the operating system from crashing, while allowing a single process to be terminated. More explicitely, the process that was scheduled for execution during the time of the crash is sacrified, while other processes on the machine shall survive regardless of their core affinity. Moreover the system shall be able to tolerate cascading failures crashing multiple cores in a row, as long as at least one working core remains active.
 
-To enable recovery, the remaining system needs to notice the crash of one of the cores. For this, the paper requires a failure detection unit (FDU), which can either be implemented in hardware or software and reliably detects failures of one or more cores in the system. This FDU will trigger a migration procedure, migrating all tasks to another core. For this, one core will be chosen to carry out the migration procedure, this will preferably be a core on another die to minimize the risk of cascading failures hitting the recovery procedure. %optional: The tasklets are equipped with IDs to overcome the possibility of multi-execution in case a cascading failure of the rescuing core.
+\begin{figure}[t]
+	\caption{The migration procedure schema}
+	\includegraphics[width=10cm]{recovery_procedure}
+	\centering
+	\label{fig:migration}
+\end{figure}
+
+
+To enable recovery, the remaining system needs to notice the crash of one of the cores. For this, the paper requires a failure detection unit (FDU), which can either be implemented in hardware or software and reliably detects failures of one or more cores in the system. This FDU will trigger a migration procedure as described in figure \ref{fig:migration}, migrating all tasks to another core. For this, one core will be chosen to carry out the migration procedure, this will preferably be a core on another die to minimize the risk of cascading failures hitting the recovery procedure. %optional: The tasklets are equipped with IDs to overcome the possibility of multi-execution in case a cascading failure of the rescuing core.
 This procedure involves the following steps, of which some are executed in high priority kernel tasklets\footnote{Kernel tasklets are small pieces of kernel work that need to be handeled in a very timely manner, usually before the next scheduling context switch} on the rescuing core and some scheduled into the global run queue and executed later on any core. On an abstract level, the task summarized are
 \begin{enumerate}
 	\item \textbf{Handle time-critical tasks} The failing core must be marked faulty inside the kernel as early as possible, so no further work is scheduled to this core and no further interrupts are sent here. Also time-critical tasks that were assigned to the failing core need to be migrated as soon as possible - tasklets are reassigned and spurious\footnote{Spurious interrupts are interrupts that are triggered without the underlying cause, usually they are physically induced or triggered by soft-errors} interrupts of all types will be sent to cope for potential hardware interrupts this core could have held.
@@ -66,9 +78,20 @@ This procedure involves the following steps, of which some are executed in high 
 This approach already seemed solid against userspace and idle failures, however if the core should fail while it holds a kernel lock, this lock will never be released and another core might deadlock. To overcome this, the team offered a solution to use lock-elision\footnote{Lock-elision assumes critical sections to be uncritically, executing them without a lock and rolling back upon detection of an actual conflict} supported by HTM, making it unnecessary for the kernel to still hold locks in almost all cases and less critical for the code to abort in that section. They only implemented this feature as a case-study, covering only run-queue locks.
 
 \section{Evaluation}
-They did two evaluations, one in a large scale context on virtual machines and one on a physical machine. Also they evaluate the performance impact by introducing HTM lock-elision.
+
+They did two evaluations, one in a large scale context on virtual machines and one on a physical machine. Also they evaluate the performance impact by introducing HTM lock-elision. 
 
 On the virtual machine, they applied typical workloads by using benchmarks and workloads in a normal server context. They modified the QEMU virtual machine to terminate a single random core at a random time when it is either in user mode, kernel mode or in idle. They ran these tests with the HTM transaction feature disabled and repeated these experiments to improve statistical significance. Even though operating with disabled transactions, the solution was able to survive all userspace and idle failures and 70\% of the kernel failures. They evaluated where in the kernel these crashes happened and found that all crashes happened in passages where the code held some kind of lock.
+
+\begin{figure}[t]
+	\caption{A typical recovery timeline}
+	\includegraphics[width=10cm]{timeline}
+	\centering
+	\label{fig:timeline}
+\end{figure}
+
+
+They also checked if their approach to migrate all tasks to the first free core would include a significant misbalance, however as displayed in figure \ref{fig:timeline}, they concluded that the typical linux scheduler is well able to rebalance an unbalanced system over the time.
 
 On the physical system, they emulated a crashing core by placing a endless loop inside a non-preemtive context at 100 representative kernel functions, causing the core executing that code snippet to not respond anymore. At first they ran this experiment multiple times with a normal linux installation and found it freezing every time after a few seconds. They repeated this experiment with the HTM-enabled CSR solution and found the system recovering in all cases. To display the effects on the running processes, they demonstrate CSR using a server running virtual machines. Only those virtual machine executed on the failing core was terminated, the other machines continued execution.
 
@@ -76,7 +99,7 @@ At last, they evaluated the performance impact of using lock-elision with HTM in
 
 \section{Discussion}
 
-This paper offers the first approach for an operating system to survive in the presence of hardware failures. It is a clear benefit to the reliabiliy of any operating system, and the overhead of holding some additional kernel bitmaps and a bigger kernel code is negligible in contrast to the advantages.
+This paper offers the first approach for an operating system to survive in the presence of core failures, thus we will not be able to compare this paper against existing or previous approaches. It is a clear benefit to the reliabiliy of any operating system, and the overhead of holding some additional kernel bitmaps and a bigger kernel code is negligible in contrast to the advantages.
 Still there are some points which lower the overall usefulness of the paper or can be critizised. Also there are some weaknesses which are already adressed within the paper
 \begin{itemize}
 	\item A lot of operating system structures are assuming code to be executed (locks, interrupts)
@@ -92,7 +115,7 @@ To cover for kernel failures, Shalev et al. used HTM transactions to wrap all ke
 \subsection{FDU} \label{fdu}
 One fundamental requirement of the work is a working failure detection unit, that can reliably detect if a core has failed and that will not stop working itself. However, in the paper there was very little discussion about the properties of this unit, except for saying that it can be implemented in hardware. This is indeed true, as there are several patents for failure detection units \cite{IBMFDU} \cite{FujitsuFDU}, however it is questionable if this unit can be assumed present on all machines. If not, this FDU would need to be emulated in software, bringing multiple drawbacks. At first, a software FDU would be bound to a process which is bound to a CPU which is assumed to be unreliable in this paper. So a solution with failover instances would need to be set up, which was not discussed in this paper. Also the FDU offers a potential vulnerability, enabling an attacker to fully disable the machine if taken over.
 
-It is also imaginable of the FDU noticing false positives, shutting down an intact processor including the currently running process while that core could still be working or just being offline for a bound amount of time and taking over old execution again. If that should be the case, it is possible that code will be executed twice, resulting in potential race-conditions, data corruption or crashes.
+It is also imaginable of the FDU noticing false positives, shutting down an intact processor. In this case, the migration procedure would be triggered terminating the process that was running at that time and migrating all other processes in this CPU's execution queue to other cores. However, that CPU would still be functioning and possibly still executing tasks inside its execution queue. Thus, at that point there would be two cores executing the same program flow, the old one and the one where the process was migrated to. This will for most programs result in data-corruption or crashes, as code which was assumed to run sequential suddenly runs with two parallel instances accessing the same memory locations.
 
 \subsection{Failures in Kernelspace}
 Through wrapping kernel operations, the paper never reached 100\% failure tolerance on their given model. There were some code parts which could not be covered inside transactions, for example the context-switch which requires a TLB flush and thus can not be protected by HTM. Also, on the other locks they had the fallback path of using the code unprotectedly after 10000 failed retries, which makes it possible for the kernel to be in the fallback path during failure. Though it was never explicitely stated that reaching 100\% of coverage was an aim and generally is very untypical for the research area of fault-tolerance, they put quite a lot of effort in reaching that aim.
@@ -126,17 +149,17 @@ Also they did not go very much in detail about their cascading failure testing. 
 
 At last, they did not name a number of repetitions/measurements for any of their tests, making it impossible to judge the significance of their test results.
 
-\section{Conclusion in context}
+\subsection{No perfect protection}
 
 The given approach requires other means of fault-tolerance to be in place already, as the shutdown of the process currently active on the core can not be avoided. It is already mentioned that this approach can only be used with other means in place, and checkpointing is given as an example. So in the given model, each process can already tolerate spontaneous shutdown. To reduce the chances of failure for each process undeniably increases it's availability, however there is no effect on the tradeoff to consistency or latency as failure chances are still far from zero. This was never an aim of this approach, and there is a lot of research available concerning the tradeoffs between these and how to manage fault-tolerance on a more abstract level. The CSR approach makes none of these approaches obsolete and does not aim to do so. It is of undeniable but not of groundbreaking impact by reducing the chance of a full node failure, not by making it impossible.
 
 \section{Conclusion}
 
-I think the paper itself is an enrichment, as this mechanism offers a benefit in availability to any computer system combined with a low overhead. However, the writers did not see the work in a real-world application, trying to reach 100\% failure tolerance within their given failure model. This does not I personally would have preferred if the focus was rather to incorporate Cache-failures aswell or to try to integrate it into a multi-cluster approach, for example by linking to existing approaches to migrate all remaining virtual machines on the node upon the first detected failure to another node. These approaches could potentially have benefitted to the total availability improvement in a real world scenario, but were not discussed in favor of a very in-depth view of this mechanism.
+We think the paper itself is an enrichment, as this mechanism offers a benefit in availability to any computer system combined with a low overhead. However, the writers did not see the work in a real-world application, trying to reach 100\% failure tolerance within their given failure model. We would have preferred if the focus was rather to incorporate Cache-failures as well or trying to integrate it into a multi-cluster approach, for example by linking to existing approaches to migrate all remaining virtual machines on the node upon the first detected failure to another node. These approaches could potentially have benefitted to the total availability improvement in a real world scenario, but were not discussed in favor of a very in-depth view of this mechanism.
 
 At the state the work is right now, we would not recommend to incorporate the kernel-transaction approach into the commodity linux kernel, however we think the solution without transactions is a great candidate for a future linux release. We would recommend to the authors put some effort into incorporating the TxLinux approach, as this would open the possibility to cover wide areas of the kernel with transactions, reaching better failure tolerance and also making the system benefit from the other advantages of hardware lock-elision. 
 
-\bibliographystyle{alpha}
+\bibliographystyle{plain}
 \bibliography{handin} 
 
 \end{document}
