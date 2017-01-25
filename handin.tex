@@ -52,12 +52,30 @@ Even to maintain data availability in the presence of single disk failures is a 
 
 Currently, distributed file systems are in the focus of research, as solutions how to reliably store huge amounts of data that exceed the capacities of a single disk by magnitudes are not so well tested. However, these approaches accept the presence of full node failures and thus are on a higher level than the paper by Shalev et al. To keep the extend of this work short, we will only focus on approaches to enable single nodes to survive hardware failures, not a whole cluster.
 
+\subsection{Linux Hotplug Mechanism} \label{hotplug}
+The linux hotplug mechanism for CPUs \cite{Linux_Hotplug} is another mechanism that increases failure tolerance of a system. Modern architechtures are able to send MCAs\footnote{Machine Check Exceptions are interrupts sent when the CPU detects a failing hardware} on a predicted core failure, and the hotplug mechanism is able to react to such MCAs by disabling the CPU core, making a real failure non-critical. This mechanism took several years to integrate into the linux kernel, as several parts of the kernel relied on the set of cores to be unchanging or were difficult to optimize without polling the state of each CPU on every execution. The addition mechanism was easy to implement - the new core just had to be added to the cpu\_online kernel bitmap, leaving every migration works to the loadbalancer. However, removal of a core is a little more complex. The mechanism needs to be triggered before the actual removal, either by the user or by some kernel code, and involves all active CPUs to cooperate, which is why it is not suited as a mechanism for spontaneously failing cores. The procedure basically includes the steps:
+\begin{itemize}
+	\item \textbf{CPU\_DOWN\_PREPARE} - Check if cpu removal is possible and make some preparations
+	\item \textbf{CPU\_DYING} Use a bogolock\footnote{A bogolock is not a lock in the traditional sense but just disables execution on all cores for a period of time} to change the cpu\_online bitmap on every core while the core going offline does some work migrating interrupts
+	\item \textbf{CPU\_DEAD} Migrates work, the dying CPU is already not executing anything anymore. Done on another core while all other cores are still spinning
+	\item \textbf{CPU\_POSTDEAD} Does uncritical work like notifying kernel statistics over the dead core.
+\end{itemize}
+
+This mechanism proved to be useful for several other mechanisms than just incorporating a predicted CPU fail, like
+\begin{itemize}
+	\item Running several instances of linux in parallel on the same machine and loadbalancing between them - cores can be removed from one instance to the other
+	\item Scaling a virtualized linux installation while running
+	\item Scaling a physical linux installation while running if payment on core usage is possible.
+\end{itemize}
+
+In 2012 Gleixner et al proposed some changes \cite{Efficient_Hotplug} to this mechanism that reduced the total execution time to 5ms, making CPU hotplug a suited mechanism to increase energy efficiency of the system by completely switching off CPUs instead of running them in idle.
+
 \section{The Topic's Approach}
-The paper CSR: Core suprise removal in commodity operating systems \cite{CSR} proposes and implements a mechanism to address the failure of cores in a multicore system. To avoid verbosity, it will further on be referenced by "the paper" or "the main paper" unless another paper was explicitely mentioned.
+The paper CSR: Core suprise removal in commodity operating systems \cite{CSR} proposes and implements a mechanism to address the spontaneous failure of cores in a multicore system. To avoid verbosity, it will further on be referenced by "the paper" or "the main paper" unless another paper was explicitely mentioned.
 
 At first, it is essential to understand the failure model the paper assumes. They cope with spontaneous, permanent failures of one or more cores in a multicore system, that could be induced by malfunctioning transistors or violations of cpu-internal constraints, causing the core to stop code execution. These failures might happen in a cascade, crashing several cores in a row within a short timespan. During a crash, the internal registers and buffers might be destroyed, however the paper requires the internal cache to be left intact.
 
-The mechanism described in the paper is loosely based on the kernel hotplug mechanism for adding and removing cores during runtime. However, the hotplug mechanism in current kernels depends on the cooperation of the core that is to be shut down, which is obviously not possible in the case of a spontaneous hardware failure. Also no notice of the failure is available in advance, so no measures can be initiated before the core fails. Currently, the operating system will panic in this case, so the aim of CSR is to keep the operating system from crashing, while allowing a single process to be terminated. More explicitely, the process that was scheduled for execution during the time of the crash is sacrified, while other processes on the machine shall survive regardless of their core affinity. Moreover the system shall be able to tolerate cascading failures crashing multiple cores in a row, as long as at least one working core remains active.
+The mechanism described in the paper is loosely based on the kernel hotplug mechanism for adding and removing cores during runtime as described in section \ref{hotplug}. However, the hotplug mechanism in current kernels depends on the cooperation of the core that is to be shut down, which is obviously not possible in the case of a spontaneous hardware failure. Also no notice of the failure is available in advance, so no measures can be initiated before the core fails. Currently, the operating system will panic in this case, so the aim of CSR is to keep the operating system from crashing, while allowing a single process to be terminated. More explicitely, the process that was scheduled for execution during the time of the crash is sacrified, while other processes on the machine shall survive regardless of their core affinity. Moreover the system shall be able to tolerate cascading failures crashing multiple cores in a row, as long as at least one working core remains active.
 
 \begin{figure}[t]
 	\caption{The migration procedure schema}
